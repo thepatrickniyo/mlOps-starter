@@ -1,0 +1,24 @@
+name: ML Pipeline
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Build Docker Image
+      run: docker build -t gcr.io/your-project-id/ml-model:latest .
+
+    # In a real scenario, you would add authentication steps here
+    # e.g., google-github-actions/auth@v1
+
+    - name: Push to Registry
+      run: docker push gcr.io/your-project-id/ml-model:latest
+
+    - name: Deploy to Kubernetes
+      run: |
+        kubectl apply -f deployment.yaml

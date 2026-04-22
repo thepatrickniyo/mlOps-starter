@@ -1,0 +1,7 @@
+import pickle
+from sklearn.linear_model import LogisticRegression
+
+model = LogisticRegression()
+# ... train model ...
+with open('app/model/model.pkl', 'wb') as f:
+    pickle.dump(model, f)
