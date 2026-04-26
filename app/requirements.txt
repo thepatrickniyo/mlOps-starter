@@ -2,3 +2,7 @@ fastapi
 uvicorn
 pandas
 scikit-learn
+redis
+sqlalchemy
+asyncpg
+pytest

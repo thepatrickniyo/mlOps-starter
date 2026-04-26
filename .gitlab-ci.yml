@@ -1,0 +1,70 @@
+stages:
+  - lint
+  - test
+  - build
+  - deploy
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  PYTHONUNBUFFERED: "1"
+
+cache:
+  paths:
+    - .cache/pip
+
+python_lint:
+  stage: lint
+  image: python:3.11-slim
+  script:
+    - python -m pip install --upgrade pip
+    - pip install -r app/requirements.txt ruff
+    - ruff check app
+
+config_validation:
+  stage: lint
+  image: python:3.11-slim
+  script:
+    - test -n "$DATABASE_URL"
+    - test -n "$REDIS_URL"
+    - test -n "$OPS_METRICS_TOKEN"
+    - test -n "$OPS_ADMIN_TOKEN"
+
+migration_safety_check:
+  stage: test
+  image: postgres:15
+  variables:
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: efiche_ci
+  services:
+    - postgres:15
+  script:
+    - until pg_isready -h postgres -U postgres; do sleep 1; done
+    - PGPASSWORD=postgres psql -h postgres -U postgres -d efiche_ci -c "CREATE TABLE visit_invoices (id BIGSERIAL PRIMARY KEY, created_at TIMESTAMPTZ DEFAULT now());"
+    - PGPASSWORD=postgres psql -h postgres -U postgres -d efiche_ci -c "INSERT INTO visit_invoices(created_at) SELECT now() FROM generate_series(1, 10000);"
+    - PGPASSWORD=postgres psql -h postgres -U postgres -d efiche_ci -f sql/20260426_add_billing_status_safe.sql
+    - PGPASSWORD=postgres psql -h postgres -U postgres -d efiche_ci -c "SELECT COUNT(*) FROM visit_invoices WHERE billing_status IS NULL;"
+
+unit_tests:
+  stage: test
+  image: python:3.11-slim
+  script:
+    - python -m pip install --upgrade pip
+    - pip install -r app/requirements.txt
+    - PYTHONPATH=app pytest -q app/tests
+
+docker_build:
+  stage: build
+  image: docker:24
+  services:
+    - docker:24-dind
+  script:
+    - docker build -t efiche-backend:$CI_COMMIT_SHA .
+
+deploy_production:
+  stage: deploy
+  image: alpine:3.20
+  script:
+    - apk add --no-cache openssh-client
+    - ssh deploy@prod "cd /app && docker pull efiche-backend:$CI_COMMIT_SHA && docker compose up -d --no-deps --pull always api"
+  only:
+    - main

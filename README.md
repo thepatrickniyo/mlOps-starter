@@ -1,104 +1,110 @@
-# MLOps Starter
+# eFiche Zero-Downtime Replication Assignment
 
-This repository contains a small FastAPI-based model serving example with supporting infrastructure for Docker, Kubernetes, Terraform, and GitHub Actions.
+This repository contains the implementation and documents for the senior MLOps/Infrastructure challenge:
 
-The application currently exposes a simple health endpoint and a placeholder prediction endpoint. The prediction logic is intentionally minimal, so the repo can be used as a starting point for a fuller MLOps workflow.
+- FastAPI endpoint upgrade from `/replication-lag` to `/replication-health`
+- Redis-backed lag history + trend/degraded classification
+- Safe PostgreSQL three-step migration script for `billing_status`
+- Improved GitLab CI pipeline with migration, config, lint, and unit-test gates
+- Written analysis and deployment design docs
 
-## What is included
+## Project Layout
 
-- FastAPI app in [app/app.py](app/app.py)
-- Python dependencies in [app/requirements.txt](app/requirements.txt)
-- Docker image definition in [Dockerfile](Dockerfile)
-- Kubernetes manifests in [k8s/deployment.yaml](k8s/deployment.yaml) and [k8s/service.yaml](k8s/service.yaml)
-- Terraform infrastructure for a Google Kubernetes Engine cluster in [terraform/main.tf](terraform/main.tf)
-- GitHub Actions workflow in [.github/workflows/deploy.yml](.github/workflows/deploy.yml)
+- `app/app.py` FastAPI service and replication health endpoint
+- `app/tests/test_replication_health.py` unit tests for trend classification
+- `sql/20260426_add_billing_status_safe.sql` zero-downtime migration script
+- `.gitlab-ci.yml` improved CI pipeline
+- `docs/submission_analysis.md` deliverable 1 (a-d)
+- `docs/design_document.md` deliverable 3 (a-c)
 
-## Prerequisites
+## Run Replication Health Locally
 
-- Python 3.9 or newer
-- pip
-- Docker
-- kubectl
-- Terraform
-- A Google Cloud project if you plan to use the Terraform and Kubernetes resources as written
+### 1) Start Redis (real Redis, local container)
 
-## Run locally
+```bash
+docker run --rm -p 6379:6379 redis:7-alpine
+```
 
-1. Create and activate a virtual environment.
-2. Install the dependencies.
-3. Start the app.
+### 2) Use a stubbed PostgreSQL replica query result
+
+The main code path always runs a real SQL query (`SELECT now() - pg_last_xact_replay_timestamp()`), but for local simulation without a real replica, you can monkeypatch the DB dependency in a short dev runner.
+
+Create `app/dev_stub_runner.py`:
+
+```python
+from datetime import timedelta
+from app import app, get_db
+
+class FakeResult:
+    def fetchone(self):
+        return (timedelta(seconds=4.2),)
+
+class FakeSession:
+    async def execute(self, *_args, **_kwargs):
+        return FakeResult()
+
+async def fake_get_db():
+    yield FakeSession()
+
+app.dependency_overrides[get_db] = fake_get_db
+```
+
+Run:
 
 ```bash
 cd app
-pip install -r requirements.txt
-python app.py
+python -m pip install -r requirements.txt
+uvicorn dev_stub_runner:app --reload --port 8080
 ```
 
-The API will be available on port `8080`.
-
-### Example requests
-
-Health check:
+Set environment (new terminal):
 
 ```bash
-curl http://localhost:8080/
+export REDIS_URL=redis://localhost:6379/0
 ```
 
-Prediction endpoint:
+Call endpoint:
 
 ```bash
-curl -X POST http://localhost:8080/predict \
-	-H "Content-Type: application/json" \
-	-d '{"feature_1": 1, "feature_2": 2}'
+curl http://localhost:8080/replication-health
 ```
 
-## Docker
-
-Build the image from the repository root:
+## Run Unit Tests
 
 ```bash
-docker build -t ml-model:latest .
+cd app
+python -m pip install -r requirements.txt
+PYTHONPATH=. pytest -q tests
 ```
 
-Run the container:
+## Simulate a Growing Lag Trend Manually
+
+Call `/replication-health` multiple times while changing the stubbed lag value upward between calls (for example: 1.0 -> 1.8 -> 2.9 -> 3.6 -> 4.2). The response should eventually return:
+
+- `"trend": "growing"`
+- a 5-point `history` ordered oldest first
+
+If you want to reset history:
 
 ```bash
-docker run -p 8080:8080 ml-model:latest
+redis-cli DEL replication:lag:history
 ```
 
-If you keep the application source inside the app/ directory, make sure the container command points to the FastAPI entry file there.
+## Stubbed vs Real Components
 
-## Kubernetes
+### Real in main code path
 
-The Kubernetes manifests deploy the model service behind a `LoadBalancer` service.
+- FastAPI route logic
+- `redis.asyncio` client operations (`LPUSH`, `LTRIM`, `LRANGE`)
+- SQL query execution against provided DB dependency
 
-Apply them after your image is available in a registry that your cluster can pull from:
+### Stubbed/mocked in tests or local simulation
 
-```bash
-kubectl apply -f k8s/deployment.yaml
-kubectl apply -f k8s/service.yaml
-```
-
-## Terraform
-
-The Terraform configuration provisions a Google Kubernetes Engine cluster.
-
-Typical workflow:
-
-```bash
-cd terraform
-terraform init
-terraform plan -var="project_id=YOUR_PROJECT_ID"
-terraform apply -var="project_id=YOUR_PROJECT_ID"
-```
-
-## CI/CD
-
-The GitHub Actions workflow in [.github/workflows/deploy.yml](.github/workflows/deploy.yml) currently builds and pushes a container image, then applies the Kubernetes deployment.
-
-Before using it in a real environment, update the placeholder registry values, add authentication, and make sure the deployment step points to the correct manifests and cluster context.
+- PostgreSQL replica query result (mocked in test/dev via dependency override)
+- Trend test data series (synthetic lag values)
 
 ## Notes
 
-- The prediction endpoint currently returns a dummy response.
-- The repository is structured so you can replace the placeholder inference logic with a trained model and wire it into the deployment pipeline.
+- Trend logic is explicit in code comments inside `classify_trend()`.
+- `degraded` becomes `true` when lag increases by more than 10 seconds across the latest 3 readings.
+- Endpoint response includes `lag_seconds`, `trend`, `degraded`, `last_checked`, and `history`.
